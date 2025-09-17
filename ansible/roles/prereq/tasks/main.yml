@@ -1,0 +1,61 @@
+---
+- name: Ensure appuser user exists
+  user:
+    name: appuser
+    state: present
+    shell: /bin/bash
+
+- name: Ensure pip3 is installed
+  package:
+    name: 
+      - python3-pip
+      - awscli2
+    state: present
+  become: yes
+  become_user: root
+
+- name: Check if pip3 is installed
+  command: pip3 --version
+  register: pip3_check
+  failed_when: pip3_check.rc != 0
+  changed_when: false
+
+- name: Check if aws cli is installed
+  command: aws --version
+  register: awscli_check
+  failed_when: awscli_check.rc != 0
+  changed_when: false
+
+- name: Ensure appuser user exists without sudo permissions
+  user:
+    name: appuser
+    state: present
+    groups: appuser
+    create_home: yes
+    append: no
+    shell: /bin/bash
+
+- name: Ensure /opt/apps directory exists and has correct permissions
+  file:
+    path: /opt/apps
+    state: directory
+    owner: appuser
+    group: appuser
+    mode: '0755'
+
+- name: Ensure /opt/apps/openjdk17 directory exists
+  file:
+    path: /opt/apps/openjdk17
+    state: directory
+    owner: appuser
+    group: appuser
+    mode: '0755'
+
+- name: Ensure appuser owns application directories
+  file:
+    path: "{{ jar_path }}"
+    state: directory
+    owner: appuser
+    group: appuser
+    mode: "0755"
+

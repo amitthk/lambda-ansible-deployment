@@ -1,0 +1,95 @@
+- name: Ensure boto3 and botocore are installed
+  pip:
+    name: boto3,botocore
+    state: present
+
+- name: Validate S3 artifacts exist before deployment
+  copy:
+    dest: /opt/apps/validate_s3_artifacts.sh
+    content: |
+      #!/bin/bash
+      set -e
+
+      # Get environment variables from Ansible vars
+      AWS_S3_BUCKET_REPOSITORY="{{ s3_bucket }}"
+      JAR_TIMESTAMP="{{ jar_timestamp }}"
+      SERVICE_NAME="{{ service_name }}"
+      S3_ARTIFACT_PATH="artifacts/${JAR_TIMESTAMP}/backend/${SERVICE_NAME}.jar"
+
+      echo "Debug: Environment variables:"
+      echo "AWS_S3_BUCKET_REPOSITORY=$AWS_S3_BUCKET_REPOSITORY"
+      echo "JAR_TIMESTAMP=$JAR_TIMESTAMP"
+      echo "SERVICE_NAME=$SERVICE_NAME"
+      echo "S3_ARTIFACT_PATH=$S3_ARTIFACT_PATH"
+
+      # Ensure required environment variables are set
+      if [ -z "$AWS_S3_BUCKET_REPOSITORY" ]; then
+          echo "Error: AWS_S3_BUCKET_REPOSITORY is not set"
+          exit 1
+      fi
+      if [ -z "$JAR_TIMESTAMP" ]; then
+          echo "Error: JAR_TIMESTAMP is not set"
+          exit 1
+      fi
+      if [ -z "$SERVICE_NAME" ]; then
+          echo "Error: SERVICE_NAME is not set"
+          exit 1
+      fi
+
+      S3_FULL_PATH="s3://${AWS_S3_BUCKET_REPOSITORY}/${S3_ARTIFACT_PATH}"
+      echo "Checking if JAR exists in S3..."
+      echo "Looking for: $S3_FULL_PATH"
+
+      S3_DIR="s3://${AWS_S3_BUCKET_REPOSITORY}/artifacts/${JAR_TIMESTAMP}/backend/"
+      echo "Listing files in S3 directory: $S3_DIR"
+      if aws s3 ls "$S3_DIR" > /tmp/s3_dir_output.txt 2>&1; then
+          echo "✓ Successfully listed S3 directory"
+          cat /tmp/s3_dir_output.txt
+      else
+          echo "✗ Failed to list S3 directory. Check if the timestamp and bucket are correct."
+          echo "Bucket: $AWS_S3_BUCKET_REPOSITORY"
+          echo "Path: artifacts/${JAR_TIMESTAMP}/backend/"
+          echo "Command output:"
+          cat /tmp/s3_dir_output.txt
+          exit 1
+      fi
+
+      if aws s3 ls "$S3_FULL_PATH" > /tmp/s3_file_output.txt 2>&1; then
+          echo "✓ JAR file found in S3: $S3_FULL_PATH"
+          cat /tmp/s3_file_output.txt
+      else
+          echo "✗ JAR file not found in S3: $S3_FULL_PATH"
+          echo "Available files in the backend directory:"
+          cat /tmp/s3_dir_output.txt
+          exit 1
+      fi
+    mode: '0755'
+    owner: appuser
+    group: appuser
+
+- name: Run S3 artifact validation
+  command: /opt/apps/validate_s3_artifacts.sh
+  register: s3_validation_output
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_default_region }}"
+  become: yes
+  become_user: appuser
+  failed_when: false
+
+- name: Display S3 validation output
+  debug:
+    var: s3_validation_output.stdout
+    
+- name: Download JAR from S3
+  amazon.aws.s3_object:
+    bucket: "{{ s3_bucket }}"
+    object: "{{ s3_artifact_path }}"
+    dest: "{{ jar_file }}"
+    mode: get
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_default_region }}"
+  register: jar_download

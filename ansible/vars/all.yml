@@ -1,0 +1,25 @@
+architecture: "arm64" # Set to "amd64" or "arm64"
+architecture_alias: "aarch64" # Set to "amd64" or "aarch64" as per architecture
+ansible_user: "{{ lookup('env', 'VM_USERNAME') }}"
+app_user: "{{ lookup('env', 'APP_USER') }}"
+remote_user: "{{ lookup('env', 'VM_USERNAME') }}"
+# Use extra-vars for these critical deployment variables
+s3_bucket: "{{ aws_s3_bucket_repository }}"
+aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+aws_default_region: "{{ lookup('env', 'AWS_DEFAULT_REGION') }}"
+ansible_ssh_private_key_file: "{{ lookup('env', 'VM_SSH_KEY') }}"
+service_name: "{{ lookup('env', 'SERVICE_NAME') }}"
+jar_timestamp: "{{ lookup('env', 'JAR_TIMESTAMP') }}"
+datasource_url: "{{ lookup('env', 'DATASOURCE_URL') }}"
+db_username: "{{ lookup('env', 'DB_USERNAME') }}"
+db_password: "{{ lookup('env', 'DB_PASSWORD') }}"
+
+app_dir: "/opt/apps"
+jar_path: "{{app_dir}}/{{ service_name }}"
+jar_file: "{{app_dir}}/{{ service_name }}/{{ service_name }}.jar"
+java_home: "{{app_dir}}/openjdk21"
+s3_artifact_path: "artifacts/{{ jar_timestamp }}/backend/{{ service_name }}.jar"
+jdk_versions:
+  - { jdk_version_short: "17", jdk_version: "17.0.11.9.1", java_url: "https://corretto.aws/downloads/resources/17.0.11.9.1/amazon-corretto-17.0.11.9.1-linux-{{architecture_alias}}.tar.gz" }
+  - { jdk_version_short: "21", jdk_version: "21.0.3.9.1", java_url: "https://corretto.aws/downloads/resources/21.0.3.9.1/amazon-corretto-21.0.3.9.1-linux-{{architecture_alias}}.tar.gz" }

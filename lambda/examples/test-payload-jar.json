@@ -1,0 +1,11 @@
+{
+  "service_name": "gateway-service",
+  "jar_timestamp": "20250803-143000",
+  "site": "SIT",
+  "use_graalvm": false,
+  "app_user": "appuser",
+  "s3_bucket": "sampleapp-artifacts",
+  "datasource_url": "jdbc:postgresql://sit-db.example.com:5432/sampleapp",
+  "db_username": "sampleapp_user",
+  "db_password": "secure_password_here"
+}

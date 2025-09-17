@@ -1,0 +1,165 @@
+name: Deploy via Lambda
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: 'Service Name to Deploy'
+        required: true
+        default: 'discovery-service'
+      jar_timestamp:
+        description: 'Timestamp for the JAR file (YYYYMMDD-HHMMSS)'
+        required: true
+      environment:
+        description: 'Target Environment'
+        required: true
+        default: 'sit'
+        type: choice
+        options:
+          - sit
+          - uat
+          - prod
+      use_graalvm:
+        description: 'Deploy GraalVM binary instead of JAR'
+        required: false
+        default: false
+        type: boolean
+      app_user:
+        description: 'Application user on target VM'
+        required: false
+        default: 'appuser'
+
+jobs:
+  deploy-via-lambda:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Validate inputs
+        run: |
+          echo "Validating deployment inputs..."
+          
+          # Validate timestamp format
+          if [[ ! "${{ github.event.inputs.jar_timestamp }}" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+            echo "❌ Invalid timestamp format. Expected: YYYYMMDD-HHMMSS"
+            exit 1
+          fi
+          
+          # Check if artifact exists in S3
+          if aws s3 ls "s3://${{ secrets.AWS_S3_BUCKET_REPOSITORY }}/artifacts/${{ github.event.inputs.jar_timestamp }}/backend/${{ github.event.inputs.service_name }}.jar"; then
+            echo "✅ Artifact found in S3"
+          else
+            echo "❌ Artifact not found in S3"
+            echo "Expected path: s3://${{ secrets.AWS_S3_BUCKET_REPOSITORY }}/artifacts/${{ github.event.inputs.jar_timestamp }}/backend/${{ github.event.inputs.service_name }}.jar"
+            exit 1
+          fi
+
+      - name: Prepare Lambda payload
+        id: payload
+        run: |
+          # Create payload for Lambda function
+          cat > lambda-payload.json <<EOF
+          {
+            "service_name": "${{ github.event.inputs.service_name }}",
+            "jar_timestamp": "${{ github.event.inputs.jar_timestamp }}",
+            "environment": "${{ github.event.inputs.environment }}",
+            "use_graalvm": ${{ github.event.inputs.use_graalvm }},
+            "app_user": "${{ github.event.inputs.app_user }}",
+            "s3_bucket": "${{ secrets.AWS_S3_BUCKET_REPOSITORY }}",
+            "triggered_by": "github-actions",
+            "git_sha": "${{ github.sha }}",
+            "workflow_run_id": "${{ github.run_id }}"
+          }
+          EOF
+          
+          echo "Lambda payload:"
+          cat lambda-payload.json
+
+      - name: Invoke Lambda function
+        id: lambda_invoke
+        run: |
+          echo "Invoking Lambda function for deployment..."
+          
+          # Invoke Lambda function
+          aws lambda invoke \
+            --function-name ansible-deployment-lambda \
+            --payload file://lambda-payload.json \
+            --cli-binary-format raw-in-base64-out \
+            lambda-response.json
+          
+          echo "Lambda invocation completed"
+
+      - name: Process Lambda response
+        run: |
+          echo "Lambda response:"
+          cat lambda-response.json
+          
+          # Check if deployment was successful
+          if grep -q '"statusCode": 200' lambda-response.json; then
+            echo "✅ Deployment completed successfully!"
+            
+            # Extract response details
+            SERVICE_NAME=$(jq -r '.body | fromjson | .service_name' lambda-response.json)
+            TIMESTAMP=$(jq -r '.body | fromjson | .timestamp' lambda-response.json)
+            ENVIRONMENT=$(jq -r '.body | fromjson | .environment' lambda-response.json)
+            TARGET_VM=$(jq -r '.body | fromjson | .target_vm' lambda-response.json)
+            
+            echo "Deployment Details:"
+            echo "  Service: $SERVICE_NAME"
+            echo "  Timestamp: $TIMESTAMP"
+            echo "  Environment: $ENVIRONMENT"
+            echo "  Target VM: $TARGET_VM"
+            
+          else
+            echo "❌ Deployment failed!"
+            
+            # Extract error details
+            ERROR_MSG=$(jq -r '.body | fromjson | .error // "Unknown error"' lambda-response.json)
+            echo "Error: $ERROR_MSG"
+            
+            # Check if there's Ansible output
+            if jq -e '.body | fromjson | .ansible_stderr' lambda-response.json >/dev/null; then
+              echo "Ansible Error Output:"
+              jq -r '.body | fromjson | .ansible_stderr' lambda-response.json
+            fi
+            
+            exit 1
+          fi
+
+      - name: Create deployment summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ github.event.inputs.service_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** ${{ github.event.inputs.jar_timestamp }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Use GraalVM:** ${{ github.event.inputs.use_graalvm }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **App User:** ${{ github.event.inputs.app_user }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git SHA:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ -f lambda-response.json ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Lambda Response" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            cat lambda-response.json >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload deployment artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-logs-${{ github.event.inputs.environment }}-${{ github.event.inputs.jar_timestamp }}
+          path: |
+            lambda-payload.json
+            lambda-response.json
+          retention-days: 30

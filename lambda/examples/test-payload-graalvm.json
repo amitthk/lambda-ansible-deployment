@@ -1,0 +1,11 @@
+{
+  "service_name": "user-service",
+  "jar_timestamp": "20250803-143000",
+  "site": "PROD",
+  "use_graalvm": true,
+  "app_user": "appuser",
+  "s3_bucket": "sampleapp-artifacts",
+  "datasource_url": "jdbc:postgresql://prod-db.example.com:5432/sampleapp",
+  "db_username": "sampleapp_prod_user",
+  "db_password": "super_secure_prod_password"
+}

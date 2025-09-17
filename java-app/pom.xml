@@ -1,0 +1,107 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.1.5</version>
+        <relativePath/>
+    </parent>
+
+    <artifactId>discovery-service</artifactId>
+    <version>1.1-SNAPSHOT</version>
+
+    <properties>
+        <sonar.moduleKey>${project.artifactId}</sonar.moduleKey>
+        <spring-cloud.version>2022.0.4</spring-cloud.version>
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-server</artifactId>
+        </dependency>
+    </dependencies>
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub Packages - sampleapp</name>
+            <url>https://maven.pkg.github.com/sampleapp/sampleapp</url>
+        </repository>
+    </distributionManagement>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+    <profiles>
+        <profile>
+            <id>build-image</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.google.cloud.tools</groupId>
+                        <artifactId>jib-maven-plugin</artifactId>
+                        <version>3.4.0</version>
+                        <configuration>
+                            <to>
+                                <image>sampleapp/${project.artifactId}:${project.version}</image>
+                            </to>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>dockerBuild</goal>
+                                </goals>
+                                <phase>package</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!--					<plugin>-->
+                    <!--						<groupId>org.springframework.boot</groupId>-->
+                    <!--						<artifactId>spring-boot-maven-plugin</artifactId>-->
+                    <!--						<configuration>-->
+                    <!--							<image>-->
+                    <!--								<name>sampleapp/${project.artifactId}:${project.version}</name>-->
+                    <!--							</image>-->
+                    <!--						</configuration>-->
+                    <!--						<executions>-->
+                    <!--							<execution>-->
+                    <!--								<goals>-->
+                    <!--									<goal>build-image</goal>-->
+                    <!--								</goals>-->
+                    <!--							</execution>-->
+                    <!--						</executions>-->
+                    <!--					</plugin>-->
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+    <build>
+    <plugins>
+    <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+    </plugin>
+                <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.5.1</version>
+                    <configuration>
+                        <source>${java.version}</source>
+                        <target>${java.version}</target>
+                    </configuration>
+            </plugin>
+    </plugins>
+    </build>
+
+</project>

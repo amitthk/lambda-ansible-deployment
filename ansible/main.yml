@@ -1,0 +1,20 @@
+- hosts: all
+  gather_facts: yes
+  connection: ssh
+  become: yes
+  become_method: sudo
+  become_user: opc
+  vars_files:
+    - vars/all.yml
+
+  pre_tasks:
+    - name: Ensure appuser user exists
+      user:
+        name: appuser
+        state: present
+        shell: /bin/bash
+  roles:
+    - { role: prereq, become: yes, become_user: root }       # Run as root (sudo required)
+    - { role: java_setup, become: yes, become_user: appuser }       # Run as appuser (no sudo)
+    - { role: deploy_jar, become: yes, become_user: appuser }  # Run as appuser (no sudo)
+    - { role: setup_service, become: yes, become_user: root }       # Run as opc (sudo required)

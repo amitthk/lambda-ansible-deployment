@@ -1,0 +1,110 @@
+name: Deploy to VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: 'Service Name to Process'
+        required: true
+        default: 'demoapp-backend'
+      site:
+        description: 'Target Site (sit1, sit2, uat, prod)'
+        required: true
+        default: 'sit1'
+      jar_timestamp:
+        description: 'Timestamp for the JAR file'
+        required: true
+
+jobs:
+  deploy-to-vm:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+      AWS_S3_BUCKET_REPOSITORY: ${{ secrets.AWS_S3_BUCKET_REPOSITORY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Add deadsnakes PPA and install Python 3.11
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository ppa:deadsnakes/ppa
+          sudo apt-get update
+          sudo apt-get install -y python3.11 python3.11-venv python3.11-distutils
+
+      - name: Install dependencies (jq, AWS CLI)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq python3.11 python3.11-venv python3.11-distutils
+          python3.11 -m pip install --upgrade pip
+          python3.11 -m pip install awscli
+          pip3 install --force-reinstall cryptography
+          pip3 -vvv install --upgrade --force-reinstall cffi
+          pip install cffi
+          echo "export PATH=\"$HOME/.local/bin:$PATH\"" >> $GITHUB_ENV
+          export PATH="$HOME/.local/bin:$PATH"
+
+      - name: Retrieve deployment secrets from AWS Secrets Manager
+        id: fetch_secrets
+        run: |
+          aws secretsmanager get-secret-value --secret-id demoapp/vm/${{ github.event.inputs.site }} --query SecretString --output text > env.json
+          for key in $(jq -r 'keys[]' env.json); do
+            value=$(jq -r --arg k "$key" '.[$k]' env.json)
+            echo "$key=$value" >> $GITHUB_ENV
+          done
+
+      - name: Retrieve ssh key from AWS Secrets Manager
+        id: fetch_ssh_key
+        run: |
+          mkdir -p ~/.ssh
+          aws secretsmanager get-secret-value --secret-id demoapp/vm/ssh-key --query SecretString --output text > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ls -l ~/.ssh/id_rsa || echo "SSH key file not found!"
+
+      - name: Set environment variables
+        run: |
+          echo "VM_HOSTNAME=${VM_HOSTNAME}"
+          echo "VM_USERNAME=${VM_USERNAME}"
+          echo "JAR_TIMESTAMP=${{ github.event.inputs.jar_timestamp }}"
+          echo "SITE=${{ github.event.inputs.site }}"
+          echo "SERVICE_NAME=${{ github.event.inputs.service_name }}"
+          echo "AWS_S3_BUCKET_REPOSITORY=${AWS_S3_BUCKET_REPOSITORY}"
+          echo "service_name=${{ github.event.inputs.service_name }}"
+
+      - name: Install Ansible
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install ansible==10.7.0
+
+      - name: Setup SSH key permissions and known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          SSH_PRIVATE_KEY_PATH="$HOME/.ssh/id_rsa"
+          chmod 600 "$SSH_PRIVATE_KEY_PATH"
+          ls -l "$SSH_PRIVATE_KEY_PATH" || echo "SSH key file not found or inaccessible!"
+          ssh-keyscan -t rsa,ecdsa,ed25519 ${VM_HOSTNAME} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run Ansible Playbook
+        run: |
+          cat <<EOF > hosts
+          [vm]
+          ${VM_HOSTNAME} ansible_user=${VM_USERNAME} ansible_connection=ssh ansible_python_interpreter=/usr/libexec/platform-python
+          EOF
+          ssh -i "$HOME/.ssh/id_rsa" -o StrictHostKeyChecking=accept-new ${VM_USERNAME}@${VM_HOSTNAME} "echo SSH connection successful"
+          ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i hosts ansible/main.yml \
+            --extra-vars "service_name=${{ github.event.inputs.service_name }} jar_timestamp=${{ github.event.inputs.jar_timestamp }} aws_s3_bucket_repository=${AWS_S3_BUCKET_REPOSITORY} aws_access_key_id=${AWS_ACCESS_KEY_ID} aws_secret_access_key=${AWS_SECRET_ACCESS_KEY} aws_default_region=${AWS_DEFAULT_REGION} site=${{ github.event.inputs.site }}" \
+            --ssh-common-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          AWS_S3_BUCKET_REPOSITORY: ${{ secrets.AWS_S3_BUCKET_REPOSITORY }}
+          SITE: ${{ github.event.inputs.site }}
+          SERVICE_NAME: ${{ github.event.inputs.service_name }}
+

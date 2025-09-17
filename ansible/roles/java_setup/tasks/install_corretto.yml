@@ -1,0 +1,41 @@
+- name: Check if Java binary exists in JDK directory
+  stat:
+    path: "{{ app_dir }}/openjdk{{ item.jdk_version_short }}/bin/java"
+  register: java_binary_check
+
+- name: Skip JDK download if Java binary exists
+  debug:
+    msg: "Java binary already exists. Skipping JDK download."
+  when: java_binary_check.stat.exists
+
+
+- name: Download Corretto {{ item.jdk_version_short }} JDK
+  get_url:
+    url: "{{ item.java_url }}"
+    dest: "/tmp/corretto-jdk.tar.gz"
+    mode: '0644'
+    force: no
+  when: not java_binary_check.stat.exists
+
+- name: Extract Corretto JDK {{ item.jdk_version_short }} to temporary location
+  unarchive:
+    src: "/tmp/corretto-jdk.tar.gz"
+    dest: "/tmp"
+    remote_src: yes
+  args:
+    creates: "/tmp/amazon-corretto-{{ item.jdk_version }}-linux-{{architecture_alias}}"
+  when: not java_binary_check.stat.exists
+
+- name: Move extracted Corretto JDK {{ item.jdk_version_short }} files to final directory
+  shell: |
+    mkdir -p {{ app_dir }}/openjdk{{ item.jdk_version_short }}
+    chmod -R 0755 /tmp/amazon-corretto-{{ item.jdk_version }}-linux-{{architecture_alias}}
+    mv /tmp/amazon-corretto-{{ item.jdk_version }}-linux-{{architecture_alias}}/* {{ app_dir }}/openjdk{{ item.jdk_version_short }}/
+  args:
+    creates: "{{ app_dir }}/openjdk{{ item.jdk_version_short }}/bin/java"
+  when: not java_binary_check.stat.exists
+
+- name: Remove the downloaded tar file
+  file:
+    dest: "/tmp/corretto-jdk.tar.gz"
+    state: absent

@@ -1,0 +1,15 @@
+[Unit]
+Description={{ service_name }}
+After=network.target
+
+[Service]
+User={{ app_user }}
+WorkingDirectory={{ jar_path }}
+Environment="JAVA_HOME={{ java_home }}"
+EnvironmentFile=/etc/sysconfig/{{ site }}
+ExecStart={{ java_home }}/bin/java -jar {{ jar_file }}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,330 @@
+#+TITLE: Serverless Ansible Deployment with AWS Lambda
+#+AUTHOR: Amit Thakur
+#+DATE: 2025-01-22
+
+* Overview
+This repository demonstrates replacing a traditional GitHub Actions VM deployment workflow with a *single AWS Lambda function* that:
+- Packages and embeds the existing =ansible/= directory
+- Fetches environment + secret material securely (Secrets Manager / KMS)
+- Executes =ansible-playbook main.yml= against a target VM
+- Deploys a Java (Spring Boot) JAR previously uploaded to S3
+- Requires only a *single scoped IAM access key* for operators
+
+Focus: Deployment demonstration (build & tests deliberately simplified).
+
+* High-Level Flow
+1. Developer builds JAR locally (or via any build system) and uploads to S3 path:
+   =s3://<ARTIFACT_BUCKET>/artifacts/<TIMESTAMP>/backend/<service>.jar=
+2. Developer invokes Lambda (CLI / API) with:
+   - service_name
+   - jar_timestamp
+   - site (environment key)
+3. Lambda:
+   - Extracts embedded Ansible bundle
+   - Retrieves VM + DB configuration + SSH key from AWS Secrets Manager
+   - Generates dynamic inventory
+   - Runs =ansible/main.yml=
+4. Remote VM:
+   - Ensures Java
+   - Downloads artifact from S3
+   - Sets up systemd service
+   - Starts application
+
+* Architecture
+#+BEGIN_SRC ascii
+Developer (Scoped Access Key)
+        |
+        v
+Invoke Lambda (ansible-deployment-lambda)
+        |
+        v
+┌──────────────────────────────────────────────────────────┐
+│ Lambda Runtime                                           │
+│  - Embedded ansible/                                     │
+│  - Extract to /tmp                                        │
+│  - Fetch secrets (Secrets Manager + KMS)                 │
+│  - Create inventory / SSH key                            │
+│  - Run ansible-playbook main.yml                        │
+└──────────────────────────────────────────────────────────┘
+        |
+        v
+Target VM  (SSH)  <-- systemd service + deployed JAR
+        ^
+        |
+   S3 Artifacts  (JAR)     Secrets Manager (VM + DB + SSH)
+#+END_SRC
+
+* Security Model (Minimal Permissions)
+Single IAM user with strictly limited policies:
+- S3 read/list on artifact & ansible buckets (+ optional put if uploading artifacts)
+- Lambda invoke on deployment function
+- SecretsManager read for required secret IDs
+- KMS decrypt (only specific CMK aliases)
+No broad admin rights required.
+
+** Entities
+| Actor        | Permissions Scope                              |
+|--------------+-----------------------------------------------|
+| Operator     | Invoke Lambda + Read S3 + Read Secrets + Decrypt |
+| Lambda Role  | Read S3 + Read Secrets + Decrypt + Logs        |
+| VM           | Only receives SSH + artifact copy             |
+
+* Secrets & Parameters Layout
+Secrets Manager (JSON secret per site):
+- =demoapp/vm/sit1=  (keys: VM_HOSTNAME, VM_USERNAME, DATASOURCE_URL, DB_USERNAME, DB_PASSWORD)
+- =demoapp/vm/uat=
+- =demoapp/vm/prod=
+SSH key (private) stored as:
+- =demoapp/vm/ssh-key=
+
+All encrypted under site-specific KMS CMK:
+- alias/demoapp-deployment-sit
+- alias/demoapp-deployment-uat
+- alias/demoapp-deployment-prod
+
+* Step-by-Step AWS Setup (Copy/Paste)
+(Replace values where appropriate.)
+
+** 1. Create KMS Keys
+#+BEGIN_SRC bash
+SIT_KEY_ID=$(aws kms create-key --description "SIT CMK" --query KeyMetadata.KeyId --output text)
+aws kms create-alias --alias-name alias/demoapp-deployment-sit --target-key-id $SIT_KEY_ID
+UAT_KEY_ID=$(aws kms create-key --description "UAT CMK" --query KeyMetadata.KeyId --output text)
+aws kms create-alias --alias-name alias/demoapp-deployment-uat --target-key-id $UAT_KEY_ID
+PROD_KEY_ID=$(aws kms create-key --description "PROD CMK" --query KeyMetadata.KeyId --output text)
+aws kms create-alias --alias-name alias/demoapp-deployment-prod --target-key-id $PROD_KEY_ID
+echo "SIT=$SIT_KEY_ID  UAT=$UAT_KEY_ID  PROD=$PROD_KEY_ID"
+#+END_SRC
+
+** 2. Create S3 Buckets
+#+BEGIN_SRC bash
+aws s3 mb s3://demoapp-artifacts
+aws s3 mb s3://demoapp-ansible
+#+END_SRC
+
+** 3. Create IAM Policies
+S3 Read (Artifacts + Ansible):
+#+BEGIN_SRC bash
+cat > /tmp/s3-policy.json <<'EOF'
+{
+ "Version":"2012-10-17",
+ "Statement":[
+  {"Effect":"Allow","Action":["s3:ListBucket"],"Resource":[
+    "arn:aws:s3:::demoapp-artifacts","arn:aws:s3:::demoapp-ansible"
+  ]},
+  {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":[
+    "arn:aws:s3:::demoapp-artifacts/*","arn:aws:s3:::demoapp-ansible/*"
+  ]}
+ ]
+}
+EOF
+aws iam create-policy --policy-name DemoAppS3Policy --policy-document file:///tmp/s3-policy.json
+#+END_SRC
+
+Lambda Invoke:
+#+BEGIN_SRC bash
+cat > /tmp/lambda-invoke.json <<'EOF'
+{
+ "Version":"2012-10-17",
+ "Statement":[
+  {"Effect":"Allow","Action":["lambda:InvokeFunction"],
+   "Resource":["arn:aws:lambda:*:*:function:ansible-deployment-lambda"]}
+ ]
+}
+EOF
+aws iam create-policy --policy-name DemoAppLambdaInvoke --policy-document file:///tmp/lambda-invoke.json
+#+END_SRC
+
+Secrets Read:
+#+BEGIN_SRC bash
+cat > /tmp/secrets-read.json <<'EOF'
+{
+ "Version":"2012-10-17",
+ "Statement":[
+  {"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],
+   "Resource":["arn:aws:secretsmanager:*:*:secret:demoapp/vm/*"]}
+ ]
+}
+EOF
+aws iam create-policy --policy-name DemoAppSecretsRead --policy-document file:///tmp/secrets-read.json
+#+END_SRC
+
+KMS Decrypt:
+#+BEGIN_SRC bash
+cat > /tmp/kms-decrypt.json <<EOF
+{
+ "Version":"2012-10-17",
+ "Statement":[
+  {"Effect":"Allow","Action":["kms:Decrypt"],
+   "Resource":[
+     "arn:aws:kms:*:*:alias/demoapp-deployment-sit",
+     "arn:aws:kms:*:*:alias/demoapp-deployment-uat",
+     "arn:aws:kms:*:*:alias/demoapp-deployment-prod"
+   ]}
+ ]
+}
+EOF
+aws iam create-policy --policy-name DemoAppKMSDecrypt --policy-document file:///tmp/kms-decrypt.json
+#+END_SRC
+
+** 4. Create Deployment IAM User
+#+BEGIN_SRC bash
+aws iam create-user --user-name demoapp-deployment-user
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+for p in DemoAppS3Policy DemoAppLambdaInvoke DemoAppSecretsRead DemoAppKMSDecrypt; do
+  aws iam attach-user-policy --user-name demoapp-deployment-user \
+    --policy-arn arn:aws:iam::$ACCOUNT_ID:policy/$p
+done
+aws iam create-access-key --user-name demoapp-deployment-user --output table
+#+END_SRC
+Store Access Key + Secret safely. These *alone* enable the full pipeline.
+
+** 5. Create Secrets (One Example + Variants)
+#+BEGIN_SRC bash
+aws secretsmanager create-secret \
+  --name demoapp/vm/sit1 \
+  --secret-string '{
+    "VM_HOSTNAME":"192.168.18.29",
+    "VM_USERNAME":"appadm",
+    "DATASOURCE_URL":"jdbc:postgresql://sit-db.internal:5432/demoapp",
+    "DB_USERNAME":"demoapp",
+    "DB_PASSWORD":"sit-pass"
+  }'
+
+aws secretsmanager create-secret \
+  --name demoapp/vm/ssh-key \
+  --secret-string "$(cat ~/.ssh/id_ed25519)"
+#+END_SRC
+
+(Repeat for uat, prod.)
+
+* Repository Structure (Relevant Parts)
+#+BEGIN_SRC
+lambda-ansible-deployment/
+├── ansible/                  # Existing working playbooks (used directly)
+│   └── main.yml
+├── lambda/
+│   ├── ansible_lambda.py     # NEW unified Lambda runner (embedded Ansible)
+│   ├── deployment_lambda.py  # (Legacy direct SSH variant - retained)
+│   ├── deploy.sh             # Packages code + ansible into Lambda
+│   └── requirements.txt
+├── java-app/                 # Sample Spring Boot service
+└── readme.org
+#+END_SRC
+
+* Build (Deliberately Simplified)
+Local (or CI) build:
+#+BEGIN_SRC bash
+cd java-app
+mvn clean package -DskipTests
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+aws s3 cp target/discovery-service-*.jar \
+  s3://demoapp-artifacts/artifacts/$TIMESTAMP/backend/discovery-service.jar
+echo "Timestamp: $TIMESTAMP"
+#+END_SRC
+
+* Deploy Lambda
+#+BEGIN_SRC bash
+cd lambda
+./deploy.sh     # Builds ansible-deployment-lambda with embedded ansible/
+aws lambda get-function --function-name ansible-deployment-lambda
+#+END_SRC
+
+* Invoke Deployment
+Prepare payload:
+#+BEGIN_SRC bash
+cat > payload.json <<EOF
+{
+  "service_name": "discovery-service",
+  "jar_timestamp": "20250122-120000",
+  "site": "sit1",
+  "app_user": "appadm"
+}
+EOF
+
+aws lambda invoke \
+  --function-name ansible-deployment-lambda \
+  --payload file://payload.json \
+  --cli-binary-format raw-in-base64-out \
+  response.json
+
+cat response.json | jq .
+#+END_SRC
+
+* What Lambda Does (Mirrors Original GitHub Action)
+| GitHub Action Step                     | Lambda Equivalent                               |
+|---------------------------------------+-------------------------------------------------|
+| Checkout repository                   | Embedded ansible/ packed inside artifact        |
+| Install Python + Ansible              | Pre-built in Lambda layer/package               |
+| Retrieve secrets (Secrets Manager)    | boto3 get_secret_value                          |
+| Retrieve SSH key                      | Same secret fetch, write to /tmp/id_rsa         |
+| Generate hosts inventory              | Dynamic file in /tmp                            |
+| ansible-playbook main.yml --extra-vars| subprocess run inside Lambda runtime            |
+| Output logs                           | CloudWatch Logs                                 |
+
+* Extra Vars Passed
+| Variable                    | Purpose                          |
+|----------------------------+----------------------------------|
+| service_name               | Systemd + artifact naming        |
+| jar_timestamp              | S3 artifact path selector        |
+| aws_s3_bucket_repository   | Source bucket for JAR            |
+| site                       | Selects secret / environment     |
+| datasource_url / db_*      | Injected into service env file   |
+
+* Monitoring
+#+BEGIN_SRC bash
+aws logs tail /aws/lambda/ansible-deployment-lambda --follow
+#+END_SRC
+
+* Minimal Operator Credential Usage
+With only:
+#+BEGIN_SRC bash
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=xxxx
+export AWS_DEFAULT_REGION=us-east-1
+# Allowed actions: lambda:InvokeFunction, s3:GetObject, secretsmanager:GetSecretValue, kms:Decrypt
+#+END_SRC
+Operator can:
+- Upload JAR
+- Trigger deployment
+- Inspect logs (if granted logs:Describe*/GetLogEvents optionally)
+
+* Security Advantages
+- No standing runners
+- No SSH keys distributed to engineers (reside encrypted)
+- Deployment logic immutable (versioned Lambda)
+- Blast radius limited by narrow IAM policies
+- Secrets rotated centrally (no repo exposure)
+
+* Cost Notes
+| Component     | Approx (100 deploys / month) |
+|---------------+------------------------------|
+| Lambda (15m)  | ~$5–8                        |
+| S3 storage    | <$1                           |
+| Secrets/KMS   | <$1                           |
+| Total         | << traditional CI VM costs    |
+
+* Troubleshooting
+| Symptom                         | Action |
+|--------------------------------+--------|
+| Timeout                        | Increase Lambda timeout (up to 900s) |
+| SSH failure                    | Validate secret values / SG rules |
+| Missing JAR                    | Verify S3 path & timestamp         |
+| Permission denied (secrets)    | Check Secrets policy + KMS alias   |
+| ansible-playbook not found     | Confirm packaging (deploy.sh rerun)|
+
+* Extensibility
+- Move dependencies to Lambda Layer if >250MB
+- Add Canary Lambda for health checks
+- Add Slack / SNS notifications post-run
+- Introduce blue/green via extra Vars
+
+* Clean-Up
+#+BEGIN_SRC bash
+aws lambda delete-function --function-name ansible-deployment-lambda
+aws iam delete-user --user-name demoapp-deployment-user
+# (Detach & delete policies if desired)
+#+END_SRC
+
+* License
+MIT (see LICENSE).

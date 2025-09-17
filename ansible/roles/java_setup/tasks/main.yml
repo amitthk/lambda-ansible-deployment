@@ -1,0 +1,3 @@
+- name: Install Corretto JDK versions
+  include_tasks: tasks/install_corretto.yml
+  loop: "{{ jdk_versions }}"
